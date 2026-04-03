@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Barometric Pressure</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -11,43 +11,47 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #f5f5f7;
     color: #1d1d1f;
-    padding: 16px;
-    max-width: 800px;
+    padding: 12px;
+    max-width: 900px;
     margin: 0 auto;
   }
 
   h1 {
-    font-size: 1.3rem;
+    font-size: 1.2rem;
     font-weight: 600;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
   }
 
   #location-label {
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     color: #6e6e73;
-    margin-bottom: 16px;
+    margin-bottom: 8px;
   }
 
   #chart-container {
     background: #fff;
     border-radius: 12px;
-    padding: 12px 8px;
+    padding: 8px 4px 4px 4px;
     box-shadow: 0 1px 3px rgba(0,0,0,0.08);
     position: relative;
+    /* Fill available width; height controlled by aspect ratio */
   }
 
-  canvas { width: 100% !important; }
+  #chart-container canvas {
+    width: 100% !important;
+    height: 100% !important;
+  }
 
   #controls {
     display: flex;
     gap: 8px;
-    margin-top: 12px;
+    margin-top: 10px;
     flex-wrap: wrap;
   }
 
   button, select {
-    font-size: 0.85rem;
-    padding: 8px 14px;
+    font-size: 0.82rem;
+    padding: 7px 12px;
     border: 1px solid #d2d2d7;
     border-radius: 8px;
     background: #fff;
@@ -59,28 +63,28 @@
   button:active { background: #e8e8ed; }
 
   #status {
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     color: #6e6e73;
-    margin-top: 12px;
+    margin-top: 8px;
     min-height: 1.2em;
   }
 
   #error {
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     color: #ff3b30;
-    margin-top: 8px;
+    margin-top: 6px;
     display: none;
   }
 
   /* --- Search with typeahead --- */
   #search-wrapper {
     position: relative;
-    margin-top: 12px;
+    margin-top: 10px;
   }
 
   #input-city {
-    font-size: 0.85rem;
-    padding: 8px 10px;
+    font-size: 0.82rem;
+    padding: 7px 10px;
     border: 1px solid #d2d2d7;
     border-radius: 8px;
     width: 100%;
@@ -112,7 +116,7 @@
 
   .dropdown-item {
     padding: 10px 12px;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     cursor: pointer;
     border-bottom: 1px solid #f0f0f0;
   }
@@ -129,8 +133,15 @@
   }
 
   .dropdown-item .city-detail {
-    font-size: 0.78rem;
+    font-size: 0.75rem;
     color: #6e6e73;
+  }
+
+  /* --- Responsive chart height --- */
+  @media (max-width: 600px) {
+    body { padding: 8px; }
+    h1 { font-size: 1.1rem; }
+    #chart-container { padding: 6px 2px 2px 2px; }
   }
 </style>
 </head>
@@ -166,6 +177,11 @@
   "use strict";
 
   const HPA_TO_INHG = 0.02953;
+
+  // Pressure reference thresholds (hPa, sea-level)
+  const PRESSURE_HIGH = 1030;
+  const PRESSURE_LOW  = 1000;
+
   let currentUnit = "hPa";
   let rawPressures = [];
   let rawTimes = [];
@@ -182,8 +198,13 @@
   const dropdown = document.getElementById("dropdown");
 
   // --- Unit conversion ---
-  function convert(hPaValues) {
-    if (currentUnit === "inHg") return hPaValues.map(v => v == null ? null : +(v * HPA_TO_INHG).toFixed(2));
+  function convert(hPaValue) {
+    if (currentUnit === "inHg") return +(hPaValue * HPA_TO_INHG).toFixed(2);
+    return hPaValue;
+  }
+
+  function convertArray(hPaValues) {
+    if (currentUnit === "inHg") return hPaValues.map(v => v == null ? null : convert(v));
     return hPaValues;
   }
 
@@ -191,30 +212,123 @@
     return currentUnit === "inHg" ? "Pressure (inHg)" : "Pressure (hPa)";
   }
 
-  // --- Fetch pressure data from Open-Meteo ---
+  // --- Fetch pressure data from Open-Meteo (sea-level pressure) ---
   async function fetchPressure(lat, lon) {
     statusEl.textContent = "Fetching data\u2026";
     errorEl.style.display = "none";
 
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
-      + `&hourly=surface_pressure&past_days=7&forecast_days=7&timezone=auto`;
+      + `&hourly=pressure_msl&past_days=7&forecast_days=7&timezone=auto`;
 
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`API error: ${resp.status}`);
     const data = await resp.json();
 
     rawTimes = data.hourly.time;
-    rawPressures = data.hourly.surface_pressure;
+    rawPressures = data.hourly.pressure_msl;
 
-    statusEl.textContent = `Data: ${data.timezone} | ${rawTimes.length} hours`;
+    statusEl.textContent = `Data: ${data.timezone} | ${rawTimes.length} hours | Sea-level pressure`;
     return data;
+  }
+
+  // --- Register plugins once ---
+  let pluginsRegistered = false;
+
+  function registerPlugins() {
+    if (pluginsRegistered) return;
+    pluginsRegistered = true;
+
+    // "Now" vertical line plugin
+    Chart.register({
+      id: "nowLine",
+      afterDraw(chart) {
+        const xScale = chart.scales.x;
+        const yScale = chart.scales.y;
+        const now = new Date();
+        const x = xScale.getPixelForValue(now);
+        if (x < xScale.left || x > xScale.right) return;
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x, yScale.top);
+        ctx.lineTo(x, yScale.bottom);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255,59,48,0.6)";
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255,59,48,0.8)";
+        ctx.font = "11px -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Now", x, yScale.top - 4);
+        ctx.restore();
+      },
+    });
+
+    // Pressure reference bands plugin
+    Chart.register({
+      id: "pressureBands",
+      beforeDraw(chart) {
+        const yScale = chart.scales.y;
+        const xScale = chart.scales.x;
+        const ctx = chart.ctx;
+        const left = xScale.left;
+        const right = xScale.right;
+
+        // Convert thresholds to current unit for pixel calculation
+        const highVal = currentUnit === "inHg" ? +(PRESSURE_HIGH * HPA_TO_INHG).toFixed(2) : PRESSURE_HIGH;
+        const lowVal  = currentUnit === "inHg" ? +(PRESSURE_LOW * HPA_TO_INHG).toFixed(2) : PRESSURE_LOW;
+
+        const yHigh = yScale.getPixelForValue(highVal);
+        const yLow  = yScale.getPixelForValue(lowVal);
+        const yTop  = yScale.top;
+        const yBot  = yScale.bottom;
+
+        ctx.save();
+
+        // High pressure zone (above 1030): light red/warm tint
+        if (yHigh > yTop) {
+          ctx.fillStyle = "rgba(255, 59, 48, 0.04)";
+          ctx.fillRect(left, yTop, right - left, Math.min(yHigh, yBot) - yTop);
+        }
+
+        // Low pressure zone (below 1000): light blue/cool tint
+        if (yLow < yBot) {
+          ctx.fillStyle = "rgba(0, 122, 255, 0.04)";
+          ctx.fillRect(left, Math.max(yLow, yTop), right - left, yBot - Math.max(yLow, yTop));
+        }
+
+        // Draw reference lines
+        function drawRefLine(yPx, label, color) {
+          if (yPx < yTop || yPx > yBot) return;
+          ctx.beginPath();
+          ctx.moveTo(left, yPx);
+          ctx.lineTo(right, yPx);
+          ctx.lineWidth = 1;
+          ctx.strokeStyle = color;
+          ctx.setLineDash([3, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // Label on the right
+          ctx.fillStyle = color;
+          ctx.font = "10px -apple-system, sans-serif";
+          ctx.textAlign = "right";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(label, right - 2, yPx - 2);
+        }
+
+        drawRefLine(yHigh, "High (1030)", "rgba(255, 59, 48, 0.45)");
+        drawRefLine(yLow, "Low (1000)", "rgba(0, 122, 255, 0.45)");
+
+        ctx.restore();
+      },
+    });
   }
 
   // --- Chart rendering ---
   function buildChart() {
     const now = new Date();
     const labels = rawTimes.map(t => new Date(t));
-    const pressures = convert(rawPressures);
+    const pressures = convertArray(rawPressures);
 
     const nowIdx = labels.findIndex(d => d > now);
     const observed = pressures.map((v, i) => i < nowIdx ? v : null);
@@ -223,6 +337,8 @@
     const ctx = document.getElementById("chart").getContext("2d");
 
     if (chart) chart.destroy();
+
+    registerPlugins();
 
     chart = new Chart(ctx, {
       type: "line",
@@ -256,10 +372,10 @@
       },
       options: {
         responsive: true,
-        maintainAspectRatio: true,
+        maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: { display: true, position: "bottom", labels: { boxWidth: 20, font: { size: 12 } } },
+          legend: { display: true, position: "bottom", labels: { boxWidth: 16, font: { size: 11 }, padding: 12 } },
           tooltip: {
             callbacks: {
               title: function (items) {
@@ -281,41 +397,30 @@
             grid: { display: false },
           },
           y: {
-            title: { display: true, text: unitLabel(), font: { size: 12 } },
-            ticks: { font: { size: 11 } },
-            grid: { color: "rgba(0,0,0,0.05)" },
+            title: { display: true, text: unitLabel(), font: { size: 11 } },
+            ticks: { font: { size: 10 } },
+            grid: { color: "rgba(0,0,0,0.04)" },
           },
+        },
+        layout: {
+          padding: { top: 16, right: 4 },
         },
       },
     });
-
-    const nowLinePlugin = {
-      id: "nowLine",
-      afterDraw(chart) {
-        const xScale = chart.scales.x;
-        const yScale = chart.scales.y;
-        const x = xScale.getPixelForValue(now);
-        if (x < xScale.left || x > xScale.right) return;
-        const ctx = chart.ctx;
-        ctx.save();
-        ctx.beginPath();
-        ctx.moveTo(x, yScale.top);
-        ctx.lineTo(x, yScale.bottom);
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = "rgba(255,59,48,0.6)";
-        ctx.setLineDash([4, 3]);
-        ctx.stroke();
-        ctx.fillStyle = "rgba(255,59,48,0.8)";
-        ctx.font = "11px -apple-system, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("Now", x, yScale.top - 4);
-        ctx.restore();
-      },
-    };
-
-    Chart.register(nowLinePlugin);
-    chart.update();
   }
+
+  // --- Dynamic chart height based on viewport ---
+  function setChartHeight() {
+    const container = document.getElementById("chart-container");
+    const vh = window.innerHeight;
+    // Use ~55% of viewport on mobile, ~50% on desktop
+    const ratio = window.innerWidth <= 600 ? 0.55 : 0.50;
+    container.style.height = Math.max(220, Math.round(vh * ratio)) + "px";
+    if (chart) chart.resize();
+  }
+
+  window.addEventListener("resize", setChartHeight);
+  setChartHeight();
 
   // --- URL hash state ---
   function updateHash(lat, lon, name) {
@@ -479,9 +584,7 @@
       async (pos) => {
         const lat = pos.coords.latitude;
         const lon = pos.coords.longitude;
-        // Show coordinates immediately, then upgrade to city name
         locationLabel.textContent = `${lat.toFixed(2)}\u00b0, ${lon.toFixed(2)}\u00b0`;
-        // Start data fetch and reverse geocode in parallel
         const dataPromise = fetchPressure(lat, lon);
         const namePromise = reverseGeocode(lat, lon);
         try {
