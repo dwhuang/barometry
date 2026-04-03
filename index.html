@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Barometric Pressure</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+    padding: 16px;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+
+  h1 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  #location-label {
+    font-size: 0.85rem;
+    color: #6e6e73;
+    margin-bottom: 16px;
+  }
+
+  #chart-container {
+    background: #fff;
+    border-radius: 12px;
+    padding: 12px 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    position: relative;
+  }
+
+  canvas { width: 100% !important; }
+
+  #controls {
+    display: flex;
+    gap: 8px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+
+  button, select {
+    font-size: 0.85rem;
+    padding: 8px 14px;
+    border: 1px solid #d2d2d7;
+    border-radius: 8px;
+    background: #fff;
+    color: #1d1d1f;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button:active { background: #e8e8ed; }
+
+  #status {
+    font-size: 0.8rem;
+    color: #6e6e73;
+    margin-top: 12px;
+    min-height: 1.2em;
+  }
+
+  #error {
+    font-size: 0.85rem;
+    color: #ff3b30;
+    margin-top: 8px;
+    display: none;
+  }
+
+  /* --- Search with typeahead --- */
+  #search-wrapper {
+    position: relative;
+    margin-top: 12px;
+  }
+
+  #input-city {
+    font-size: 0.85rem;
+    padding: 8px 10px;
+    border: 1px solid #d2d2d7;
+    border-radius: 8px;
+    width: 100%;
+  }
+
+  #input-city:focus {
+    outline: none;
+    border-color: #007aff;
+  }
+
+  #dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: #fff;
+    border: 1px solid #d2d2d7;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    z-index: 10;
+    max-height: 220px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  #dropdown.open { display: block; }
+
+  .dropdown-item {
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    border-bottom: 1px solid #f0f0f0;
+  }
+
+  .dropdown-item:last-child { border-bottom: none; }
+
+  .dropdown-item:hover,
+  .dropdown-item.active {
+    background: #f0f0f5;
+  }
+
+  .dropdown-item .city-name {
+    font-weight: 500;
+  }
+
+  .dropdown-item .city-detail {
+    font-size: 0.78rem;
+    color: #6e6e73;
+  }
+</style>
+</head>
+<body>
+
+<h1>Barometric Pressure</h1>
+<div id="location-label">Locating&hellip;</div>
+
+<div id="chart-container">
+  <canvas id="chart"></canvas>
+</div>
+
+<div id="controls">
+  <button id="btn-locate" type="button">Use My Location</button>
+  <select id="unit-select">
+    <option value="hPa">hPa</option>
+    <option value="inHg">inHg</option>
+  </select>
+</div>
+
+<div id="search-wrapper">
+  <input id="input-city" type="text" placeholder="Search city…" autocomplete="off">
+  <div id="dropdown"></div>
+</div>
+
+<div id="status"></div>
+<div id="error"></div>
+
+<script src="chart.min.js"></script>
+<script src="chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  const HPA_TO_INHG = 0.02953;
+  let currentUnit = "hPa";
+  let rawPressures = [];
+  let rawTimes = [];
+  let chart = null;
+  let currentLat = null;
+  let currentLon = null;
+
+  // --- UI refs ---
+  const locationLabel = document.getElementById("location-label");
+  const statusEl = document.getElementById("status");
+  const errorEl = document.getElementById("error");
+  const unitSelect = document.getElementById("unit-select");
+  const inputCity = document.getElementById("input-city");
+  const dropdown = document.getElementById("dropdown");
+
+  // --- Unit conversion ---
+  function convert(hPaValues) {
+    if (currentUnit === "inHg") return hPaValues.map(v => v == null ? null : +(v * HPA_TO_INHG).toFixed(2));
+    return hPaValues;
+  }
+
+  function unitLabel() {
+    return currentUnit === "inHg" ? "Pressure (inHg)" : "Pressure (hPa)";
+  }
+
+  // --- Fetch pressure data from Open-Meteo ---
+  async function fetchPressure(lat, lon) {
+    statusEl.textContent = "Fetching data\u2026";
+    errorEl.style.display = "none";
+
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
+      + `&hourly=surface_pressure&past_days=7&forecast_days=7&timezone=auto`;
+
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    const data = await resp.json();
+
+    rawTimes = data.hourly.time;
+    rawPressures = data.hourly.surface_pressure;
+
+    statusEl.textContent = `Data: ${data.timezone} | ${rawTimes.length} hours`;
+    return data;
+  }
+
+  // --- Chart rendering ---
+  function buildChart() {
+    const now = new Date();
+    const labels = rawTimes.map(t => new Date(t));
+    const pressures = convert(rawPressures);
+
+    const nowIdx = labels.findIndex(d => d > now);
+    const observed = pressures.map((v, i) => i < nowIdx ? v : null);
+    const forecast = pressures.map((v, i) => i >= nowIdx - 1 ? v : null);
+
+    const ctx = document.getElementById("chart").getContext("2d");
+
+    if (chart) chart.destroy();
+
+    chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Observed",
+            data: observed,
+            borderColor: "#007aff",
+            backgroundColor: "rgba(0,122,255,0.08)",
+            fill: true,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+          },
+          {
+            label: "Forecast",
+            data: forecast,
+            borderColor: "#007aff",
+            borderDash: [6, 4],
+            backgroundColor: "rgba(0,122,255,0.04)",
+            fill: true,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: true,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: true, position: "bottom", labels: { boxWidth: 20, font: { size: 12 } } },
+          tooltip: {
+            callbacks: {
+              title: function (items) {
+                const d = new Date(items[0].parsed.x);
+                return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+              },
+              label: function (item) {
+                if (item.parsed.y == null) return null;
+                return `${item.dataset.label}: ${item.parsed.y} ${currentUnit}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: "time",
+            time: { unit: "day", tooltipFormat: "MMM d, HH:mm" },
+            ticks: { maxTicksLimit: 8, font: { size: 11 } },
+            grid: { display: false },
+          },
+          y: {
+            title: { display: true, text: unitLabel(), font: { size: 12 } },
+            ticks: { font: { size: 11 } },
+            grid: { color: "rgba(0,0,0,0.05)" },
+          },
+        },
+      },
+    });
+
+    const nowLinePlugin = {
+      id: "nowLine",
+      afterDraw(chart) {
+        const xScale = chart.scales.x;
+        const yScale = chart.scales.y;
+        const x = xScale.getPixelForValue(now);
+        if (x < xScale.left || x > xScale.right) return;
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(x, yScale.top);
+        ctx.lineTo(x, yScale.bottom);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = "rgba(255,59,48,0.6)";
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.fillStyle = "rgba(255,59,48,0.8)";
+        ctx.font = "11px -apple-system, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Now", x, yScale.top - 4);
+        ctx.restore();
+      },
+    };
+
+    Chart.register(nowLinePlugin);
+    chart.update();
+  }
+
+  // --- URL hash state ---
+  function updateHash(lat, lon, name) {
+    const params = new URLSearchParams();
+    params.set("lat", lat.toFixed(4));
+    params.set("lon", lon.toFixed(4));
+    if (name) params.set("name", name);
+    history.replaceState(null, "", "#" + params.toString());
+  }
+
+  function readHash() {
+    const hash = location.hash.slice(1);
+    if (!hash) return null;
+    const params = new URLSearchParams(hash);
+    const lat = parseFloat(params.get("lat"));
+    const lon = parseFloat(params.get("lon"));
+    if (isNaN(lat) || isNaN(lon)) return null;
+    return { lat, lon, name: params.get("name") || null };
+  }
+
+  // --- Load data for a lat/lon and render ---
+  async function loadLocation(lat, lon, name) {
+    currentLat = lat;
+    currentLon = lon;
+    locationLabel.textContent = name || `${lat.toFixed(2)}\u00b0, ${lon.toFixed(2)}\u00b0`;
+    updateHash(lat, lon, name);
+    errorEl.style.display = "none";
+    try {
+      await fetchPressure(lat, lon);
+      buildChart();
+    } catch (e) {
+      showError(e.message);
+    }
+  }
+
+  // --- Reverse geocoding via Nominatim (OpenStreetMap) ---
+  async function reverseGeocode(lat, lon) {
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&zoom=10`;
+      const resp = await fetch(url, {
+        headers: { "Accept-Language": "en" }
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json();
+      const a = data.address || {};
+      const city = a.city || a.town || a.village || a.municipality || "";
+      const state = a.state || "";
+      const country = a.country || "";
+      return [city, state, country].filter(Boolean).join(", ");
+    } catch {
+      return null;
+    }
+  }
+
+  // --- Forward geocoding via Open-Meteo (returns multiple results) ---
+  async function searchCities(query) {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(query)}&count=6&language=en&format=json`;
+    const resp = await fetch(url);
+    if (!resp.ok) return [];
+    const data = await resp.json();
+    if (!data.results) return [];
+    return data.results.map(r => ({
+      lat: r.latitude,
+      lon: r.longitude,
+      name: r.name,
+      detail: [r.admin1, r.country].filter(Boolean).join(", "),
+      fullName: [r.name, r.admin1, r.country].filter(Boolean).join(", "),
+    }));
+  }
+
+  // --- Typeahead dropdown ---
+  let debounceTimer = null;
+  let activeIdx = -1;
+  let currentResults = [];
+
+  function renderDropdown(results) {
+    currentResults = results;
+    activeIdx = -1;
+    if (results.length === 0) {
+      dropdown.classList.remove("open");
+      dropdown.innerHTML = "";
+      return;
+    }
+    dropdown.innerHTML = results.map((r, i) =>
+      `<div class="dropdown-item" data-index="${i}">
+        <div class="city-name">${r.name}</div>
+        <div class="city-detail">${r.detail}</div>
+      </div>`
+    ).join("");
+    dropdown.classList.add("open");
+  }
+
+  function closeDropdown() {
+    dropdown.classList.remove("open");
+    dropdown.innerHTML = "";
+    currentResults = [];
+    activeIdx = -1;
+  }
+
+  function selectResult(idx) {
+    const r = currentResults[idx];
+    if (!r) return;
+    inputCity.value = "";
+    closeDropdown();
+    loadLocation(r.lat, r.lon, r.fullName);
+  }
+
+  inputCity.addEventListener("input", () => {
+    const q = inputCity.value.trim();
+    clearTimeout(debounceTimer);
+    if (q.length < 2) { closeDropdown(); return; }
+    debounceTimer = setTimeout(async () => {
+      const results = await searchCities(q);
+      renderDropdown(results);
+    }, 250);
+  });
+
+  inputCity.addEventListener("keydown", (e) => {
+    if (!dropdown.classList.contains("open")) return;
+    const items = dropdown.querySelectorAll(".dropdown-item");
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      activeIdx = Math.min(activeIdx + 1, items.length - 1);
+      items.forEach((el, i) => el.classList.toggle("active", i === activeIdx));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      activeIdx = Math.max(activeIdx - 1, 0);
+      items.forEach((el, i) => el.classList.toggle("active", i === activeIdx));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (activeIdx >= 0) {
+        selectResult(activeIdx);
+      } else if (currentResults.length > 0) {
+        selectResult(0);
+      }
+    } else if (e.key === "Escape") {
+      closeDropdown();
+    }
+  });
+
+  dropdown.addEventListener("click", (e) => {
+    const item = e.target.closest(".dropdown-item");
+    if (!item) return;
+    selectResult(parseInt(item.dataset.index, 10));
+  });
+
+  // Close dropdown when clicking outside
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest("#search-wrapper")) closeDropdown();
+  });
+
+  // --- Geolocation with reverse geocode ---
+  async function locateAndLoad() {
+    if (!navigator.geolocation) {
+      locationLabel.textContent = "Location unavailable";
+      statusEl.textContent = "Search for a city to get started.";
+      return;
+    }
+    locationLabel.textContent = "Locating\u2026";
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const lat = pos.coords.latitude;
+        const lon = pos.coords.longitude;
+        // Show coordinates immediately, then upgrade to city name
+        locationLabel.textContent = `${lat.toFixed(2)}\u00b0, ${lon.toFixed(2)}\u00b0`;
+        // Start data fetch and reverse geocode in parallel
+        const dataPromise = fetchPressure(lat, lon);
+        const namePromise = reverseGeocode(lat, lon);
+        try {
+          await dataPromise;
+          currentLat = lat;
+          currentLon = lon;
+          buildChart();
+        } catch (e) {
+          showError(e.message);
+        }
+        const name = await namePromise;
+        if (name) {
+          locationLabel.textContent = name;
+          updateHash(lat, lon, name);
+        }
+      },
+      () => {
+        locationLabel.textContent = "Location unavailable";
+        statusEl.textContent = "Search for a city to get started.";
+      },
+      { enableHighAccuracy: false, timeout: 10000 }
+    );
+  }
+
+  function showError(msg) {
+    errorEl.textContent = msg;
+    errorEl.style.display = "block";
+  }
+
+  // --- Event handlers ---
+  document.getElementById("btn-locate").addEventListener("click", locateAndLoad);
+
+  unitSelect.addEventListener("change", () => {
+    currentUnit = unitSelect.value;
+    if (rawPressures.length) buildChart();
+  });
+
+  // --- Auto-load on page open ---
+  const hashLoc = readHash();
+  if (hashLoc) {
+    loadLocation(hashLoc.lat, hashLoc.lon, hashLoc.name);
+  } else {
+    locateAndLoad();
+  }
+})();
+</script>
+</body>
+</html>
