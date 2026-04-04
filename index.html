@@ -376,6 +376,87 @@
         ctx.restore();
       },
     });
+
+    // Rate-of-change background bands plugin (for gradient chart only)
+    Chart.register({
+      id: "rateBands",
+      beforeDraw(ch) {
+        // Only apply to gradient chart (explicitly opted in)
+        if (ch.options.plugins.rateBands !== true) return;
+        const yScale = ch.scales.y;
+        const xScale = ch.scales.x;
+        const ctx = ch.ctx;
+        const left = xScale.left;
+        const right = xScale.right;
+        const yTop = yScale.top;
+        const yBot = yScale.bottom;
+
+        // Convert thresholds to display unit
+        const t1 = currentUnit === "inHg" ? 1 * HPA_TO_INHG : 1;
+        const t2 = currentUnit === "inHg" ? 2 * HPA_TO_INHG : 2;
+
+        const yP2 = yScale.getPixelForValue(t2);
+        const yP1 = yScale.getPixelForValue(t1);
+        const yZero = yScale.getPixelForValue(0);
+        const yN1 = yScale.getPixelForValue(-t1);
+        const yN2 = yScale.getPixelForValue(-t2);
+
+        ctx.save();
+
+        // Fast rising (above +2): strong red
+        if (yP2 > yTop) {
+          ctx.fillStyle = "rgba(255, 59, 48, 0.06)";
+          ctx.fillRect(left, yTop, right - left, Math.min(yP2, yBot) - yTop);
+        }
+
+        // Moderate rising (+1 to +2): light red
+        const modRiseTop = Math.max(yP2, yTop);
+        const modRiseBot = Math.min(yP1, yBot);
+        if (modRiseBot > modRiseTop) {
+          ctx.fillStyle = "rgba(255, 59, 48, 0.03)";
+          ctx.fillRect(left, modRiseTop, right - left, modRiseBot - modRiseTop);
+        }
+
+        // Moderate falling (-1 to -2): light blue
+        const modFallTop = Math.max(yN1, yTop);
+        const modFallBot = Math.min(yN2, yBot);
+        if (modFallBot > modFallTop) {
+          ctx.fillStyle = "rgba(0, 122, 255, 0.03)";
+          ctx.fillRect(left, modFallTop, right - left, modFallBot - modFallTop);
+        }
+
+        // Fast falling (below -2): strong blue
+        if (yN2 < yBot) {
+          ctx.fillStyle = "rgba(0, 122, 255, 0.06)";
+          ctx.fillRect(left, Math.max(yN2, yTop), right - left, yBot - Math.max(yN2, yTop));
+        }
+
+        // Draw threshold lines
+        function drawLine(yPx, label, color) {
+          if (yPx < yTop || yPx > yBot) return;
+          ctx.beginPath();
+          ctx.moveTo(left, yPx);
+          ctx.lineTo(right, yPx);
+          ctx.lineWidth = 0.5;
+          ctx.strokeStyle = color;
+          ctx.setLineDash([2, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.fillStyle = color;
+          ctx.font = "9px -apple-system, sans-serif";
+          ctx.textAlign = "right";
+          ctx.textBaseline = "bottom";
+          ctx.fillText(label, right - 2, yPx - 1);
+        }
+
+        drawLine(yP2, "Fast", "rgba(180, 0, 0, 0.4)");
+        drawLine(yP1, "Mod.", "rgba(255, 59, 48, 0.35)");
+        drawLine(yN1, "Mod.", "rgba(0, 122, 255, 0.35)");
+        drawLine(yN2, "Fast", "rgba(0, 0, 180, 0.4)");
+
+        ctx.restore();
+      },
+    });
   }
 
   // --- Chart rendering ---
@@ -542,13 +623,39 @@
 
     if (gradientChart) gradientChart.destroy();
 
-    // Segment styling: color each line segment based on value
-    function segmentColor(context, fallback) {
-      const p0 = context.p0.parsed.y;
-      const p1 = context.p1.parsed.y;
-      const avg = (p0 + p1) / 2;
-      if (avg >= 0) return "rgba(255, 59, 48, 0.75)";
-      return "rgba(0, 122, 255, 0.75)";
+    // Segment styling: color intensity based on rate of change
+    // < 1 hPa/hr: gentle, 1-2: moderate, > 2: fast
+    function rateColor(val) {
+      const abs = Math.abs(val);
+      if (val >= 0) {
+        // Rising: red tones
+        if (abs >= 2) return { border: "rgba(180, 0, 0, 0.9)",  fill: "rgba(255, 59, 48, 0.30)" };
+        if (abs >= 1) return { border: "rgba(255, 59, 48, 0.8)", fill: "rgba(255, 59, 48, 0.18)" };
+        return              { border: "rgba(255, 120, 100, 0.6)", fill: "rgba(255, 59, 48, 0.08)" };
+      } else {
+        // Falling: blue tones
+        if (abs >= 2) return { border: "rgba(0, 0, 180, 0.9)",  fill: "rgba(0, 122, 255, 0.30)" };
+        if (abs >= 1) return { border: "rgba(0, 122, 255, 0.8)", fill: "rgba(0, 122, 255, 0.18)" };
+        return              { border: "rgba(100, 160, 255, 0.6)", fill: "rgba(0, 122, 255, 0.08)" };
+      }
+    }
+
+    // Convert thresholds for inHg mode
+    function rateThreshold(hpaVal) {
+      return currentUnit === "inHg" ? hpaVal * HPA_TO_INHG : hpaVal;
+    }
+
+    function segmentBorderColor(ctx2) {
+      const avg = (ctx2.p0.parsed.y + ctx2.p1.parsed.y) / 2;
+      // Convert back to hPa for threshold comparison
+      const hpaAvg = currentUnit === "inHg" ? avg / HPA_TO_INHG : avg;
+      return rateColor(hpaAvg).border;
+    }
+
+    function segmentFillColor(ctx2) {
+      const avg = (ctx2.p0.parsed.y + ctx2.p1.parsed.y) / 2;
+      const hpaAvg = currentUnit === "inHg" ? avg / HPA_TO_INHG : avg;
+      return rateColor(hpaAvg).fill;
     }
 
     gradientChart = new Chart(ctx, {
@@ -560,11 +667,8 @@
             label: "Observed",
             data: observed,
             segment: {
-              borderColor: ctx2 => segmentColor(ctx2),
-              backgroundColor: ctx2 => {
-                const avg = (ctx2.p0.parsed.y + ctx2.p1.parsed.y) / 2;
-                return avg >= 0 ? "rgba(255, 59, 48, 0.12)" : "rgba(0, 122, 255, 0.12)";
-              },
+              borderColor: segmentBorderColor,
+              backgroundColor: segmentFillColor,
             },
             borderColor: "rgba(142,142,147,0.5)",
             backgroundColor: "rgba(0,0,0,0.02)",
@@ -578,12 +682,9 @@
             label: "Forecast",
             data: forecast,
             segment: {
-              borderColor: ctx2 => segmentColor(ctx2),
-              borderDash: ctx2 => [6, 4],
-              backgroundColor: ctx2 => {
-                const avg = (ctx2.p0.parsed.y + ctx2.p1.parsed.y) / 2;
-                return avg >= 0 ? "rgba(255, 59, 48, 0.08)" : "rgba(0, 122, 255, 0.08)";
-              },
+              borderColor: segmentBorderColor,
+              borderDash: () => [6, 4],
+              backgroundColor: segmentFillColor,
             },
             borderColor: "rgba(142,142,147,0.5)",
             borderDash: [6, 4],
@@ -603,6 +704,7 @@
         plugins: {
           legend: { display: false },
           syncHoverPlugin: { target: "pressure" },
+          rateBands: true,
           tooltip: {
             filter: function (item) {
               return item.parsed.y != null;
@@ -615,10 +717,16 @@
               },
               label: function (item) {
                 if (item.parsed.y == null) return null;
-                const sign = item.parsed.y >= 0 ? "+" : "";
+                const val = item.parsed.y;
+                const hpaVal = currentUnit === "inHg" ? val / HPA_TO_INHG : val;
+                const abs = Math.abs(hpaVal);
+                const sign = val >= 0 ? "+" : "";
                 const unit = currentUnit === "inHg" ? "inHg/hr" : "hPa/hr";
-                const direction = item.parsed.y >= 0 ? "Rising" : "Falling";
-                return `${direction}: ${sign}${item.parsed.y} ${unit}`;
+                const direction = val >= 0 ? "Rising" : "Falling";
+                let speed = "slow";
+                if (abs >= 2) speed = "fast";
+                else if (abs >= 1) speed = "moderate";
+                return `${direction} (${speed}): ${sign}${val} ${unit}`;
               },
             },
           },
