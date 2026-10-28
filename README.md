@@ -6,13 +6,14 @@ A client-side web app that displays 14 days of barometric pressure data (7 days 
 
 ## Features
 
-- Sea-level pressure chart with observed (solid) and forecast (dashed) lines
+- Sea-level pressure chart with observed (solid) and forecast (dashed) lines, plus a dew point overlay
 - Rate-of-change chart showing rising (red) and falling (blue) pressure trends
+- Temperature and relative humidity chart
 - High/Low pressure reference bands (1030 / 1000 hPa)
 - Auto-detect location via browser geolocation
 - City search with typeahead dropdown
-- Synchronized hover crosshair across both charts
-- hPa / inHg unit toggle
+- Synchronized hover crosshair across all charts
+- hPa / inHg unit toggle (temperatures follow: °C / °F)
 - Shareable URLs with location encoded in the hash
 - Fully client-side — no server required
 

@@ -38,12 +38,14 @@
   }
 
   #chart-container canvas,
-  #gradient-container canvas {
+  #gradient-container canvas,
+  #humidity-container canvas {
     width: 100% !important;
     height: 100% !important;
   }
 
-  #gradient-container {
+  #gradient-container,
+  #humidity-container {
     background: #fff;
     border-radius: 12px;
     padding: 8px 4px 4px 4px;
@@ -168,6 +170,10 @@
   <canvas id="gradient-chart"></canvas>
 </div>
 
+<div id="humidity-container">
+  <canvas id="humidity-chart"></canvas>
+</div>
+
 <div id="controls">
   <button id="btn-locate" type="button">Use My Location</button>
   <select id="unit-select">
@@ -198,9 +204,13 @@
 
   let currentUnit = "hPa";
   let rawPressures = [];
+  let rawHumidity = [];
+  let rawDewPoint = [];
+  let rawTemperature = [];
   let rawTimes = [];
   let chart = null;
   let gradientChart = null;
+  let humidityChart = null;
   let currentLat = null;
   let currentLon = null;
 
@@ -227,13 +237,24 @@
     return currentUnit === "inHg" ? "Pressure (inHg)" : "Pressure (hPa)";
   }
 
-  // --- Fetch pressure data from Open-Meteo (sea-level pressure) ---
+  // Temperatures follow the pressure unit: inHg (imperial) shows \u00b0F, hPa shows \u00b0C
+  function tempUnit() {
+    return currentUnit === "inHg" ? "\u00b0F" : "\u00b0C";
+  }
+
+  function convertTemp(celsius) {
+    if (celsius == null) return null;
+    return currentUnit === "inHg" ? +(celsius * 9 / 5 + 32).toFixed(1) : celsius;
+  }
+
+  // --- Fetch pressure, dew point, temperature and humidity from Open-Meteo ---
   async function fetchPressure(lat, lon) {
     statusEl.textContent = "Fetching data\u2026";
     errorEl.style.display = "none";
 
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}`
-      + `&hourly=pressure_msl&past_days=7&forecast_days=7&timezone=auto`;
+      + `&hourly=pressure_msl,dew_point_2m,temperature_2m,relative_humidity_2m`
+      + `&past_days=7&forecast_days=7&timezone=auto`;
 
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`API error: ${resp.status}`);
@@ -241,8 +262,11 @@
 
     rawTimes = data.hourly.time;
     rawPressures = data.hourly.pressure_msl;
+    rawDewPoint = data.hourly.dew_point_2m;
+    rawTemperature = data.hourly.temperature_2m;
+    rawHumidity = data.hourly.relative_humidity_2m;
 
-    statusEl.textContent = `Data: ${data.timezone} | ${rawTimes.length} hours | Sea-level pressure`;
+    statusEl.textContent = `Data: ${data.timezone} | ${rawTimes.length} hours | Sea-level pressure, dew point, temperature, humidity`;
     return data;
   }
 
@@ -302,18 +326,14 @@
       },
     });
 
-    // Synchronized hover plugin
+    // Synchronized hover plugin: mirror the hovered hour onto every other chart
     Chart.register({
       id: "syncHoverPlugin",
       afterEvent(ch, args) {
-        const opts = ch.options.plugins.syncHoverPlugin;
-        if (!opts) return;
         if (args.event.type === "mousemove" || args.event.type === "mouseout") {
-          if (opts.target === "gradient") {
-            syncToTarget(ch, gradientChart);
-          } else if (opts.target === "pressure") {
-            syncToTarget(ch, chart);
-          }
+          [chart, gradientChart, humidityChart].forEach(target => {
+            if (target !== ch) syncToTarget(ch, target);
+          });
         }
       },
     });
@@ -322,6 +342,8 @@
     Chart.register({
       id: "pressureBands",
       beforeDraw(chart) {
+        // Only apply to pressure chart (explicitly opted in)
+        if (chart.options.plugins.pressureBands !== true) return;
         const yScale = chart.scales.y;
         const xScale = chart.scales.x;
         const ctx = chart.ctx;
@@ -460,6 +482,12 @@
   }
 
   // --- Chart rendering ---
+  // Single-dataset series dash their segments from "now" on, matching the
+  // observed/forecast split used for pressure
+  function forecastDashFrom(nowIdx) {
+    return (ctx2) => ctx2.p0DataIndex >= nowIdx - 1 ? [6, 4] : undefined;
+  }
+
   function buildChart() {
     const now = new Date();
     const labels = rawTimes.map(t => new Date(t));
@@ -468,6 +496,8 @@
     const nowIdx = labels.findIndex(d => d > now);
     const observed = pressures.map((v, i) => i < nowIdx ? v : null);
     const forecast = pressures.map((v, i) => i >= nowIdx - 1 ? v : null);
+    const dewPoints = rawDewPoint.map(convertTemp);
+    const forecastDash = forecastDashFrom(nowIdx);
 
     const ctx = document.getElementById("chart").getContext("2d");
 
@@ -481,7 +511,7 @@
         labels,
         datasets: [
           {
-            label: "Observed",
+            label: "Pressure",
             data: observed,
             borderColor: "#007aff",
             backgroundColor: "rgba(0,122,255,0.08)",
@@ -492,13 +522,26 @@
             spanGaps: false,
           },
           {
-            label: "Forecast",
+            label: "Pressure (forecast)",
             data: forecast,
             borderColor: "#007aff",
             borderDash: [6, 4],
             backgroundColor: "rgba(0,122,255,0.04)",
             fill: true,
             borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+          },
+          {
+            label: "Dew point",
+            data: dewPoints,
+            yAxisID: "dew",
+            borderColor: "#eb6834",
+            backgroundColor: "rgba(235,104,52,0.12)",
+            segment: { borderDash: forecastDash },
+            fill: false,
+            borderWidth: 1.5,
             pointRadius: 0,
             tension: 0.3,
             spanGaps: false,
@@ -511,7 +554,7 @@
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: true, position: "bottom", labels: { boxWidth: 16, font: { size: 11 }, padding: 12 } },
-          syncHoverPlugin: { target: "gradient" },
+          pressureBands: true,
           tooltip: {
             callbacks: {
               title: function (items) {
@@ -520,6 +563,7 @@
               },
               label: function (item) {
                 if (item.parsed.y == null) return null;
+                if (item.dataset.yAxisID === "dew") return `${item.dataset.label}: ${item.parsed.y}${tempUnit()}`;
                 return `${item.dataset.label}: ${item.parsed.y} ${currentUnit}`;
               },
             },
@@ -537,6 +581,11 @@
             ticks: { font: { size: 10 } },
             grid: { color: "rgba(0,0,0,0.04)" },
           },
+          dew: {
+            position: "right",
+            ticks: { font: { size: 10 }, callback: v => `${v}${tempUnit()}` },
+            grid: { display: false },
+          },
         },
         layout: {
           padding: { top: 16, right: 4 },
@@ -546,7 +595,7 @@
   }
 
   // --- Synchronized hover between charts ---
-  // Both charts share the same labels array (same length, same indices).
+  // All charts share the same labels array (same length, same indices).
   // We use a plugin that fires afterEvent to sync after Chart.js has
   // resolved the active elements on the source chart.
   let syncing = false;
@@ -703,7 +752,6 @@
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: false },
-          syncHoverPlugin: { target: "pressure" },
           rateBands: true,
           tooltip: {
             filter: function (item) {
@@ -751,20 +799,147 @@
     });
   }
 
+  // --- Temperature & humidity chart ---
+  function buildHumidityChart() {
+    const now = new Date();
+    const labels = rawTimes.map(t => new Date(t));
+    const temps = rawTemperature.map(convertTemp);
+    const nowIdx = labels.findIndex(d => d > now);
+    const forecastDash = forecastDashFrom(nowIdx);
+
+    const ctx = document.getElementById("humidity-chart").getContext("2d");
+
+    if (humidityChart) humidityChart.destroy();
+
+    humidityChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: "Temperature",
+            data: temps,
+            borderColor: "#eda100",
+            backgroundColor: "rgba(237,161,0,0.12)",
+            segment: { borderDash: forecastDash },
+            fill: false,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+          },
+          {
+            label: "Rel. humidity",
+            data: rawHumidity,
+            yAxisID: "rh",
+            borderColor: "#1baf7a",
+            backgroundColor: "rgba(27,175,122,0.12)",
+            segment: { borderDash: forecastDash },
+            fill: false,
+            borderWidth: 1.5,
+            pointRadius: 0,
+            tension: 0.3,
+            spanGaps: false,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: true, position: "bottom", labels: { boxWidth: 16, font: { size: 11 }, padding: 12 } },
+          tooltip: {
+            callbacks: {
+              title: function (items) {
+                if (!items.length) return "";
+                const d = new Date(items[0].parsed.x);
+                return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+              },
+              label: function (item) {
+                if (item.parsed.y == null) return null;
+                if (item.dataset.yAxisID === "rh") return `${item.dataset.label}: ${item.parsed.y}%`;
+                return `${item.dataset.label}: ${item.parsed.y}${tempUnit()}`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: "time",
+            time: { unit: "day", tooltipFormat: "MMM d, HH:mm" },
+            ticks: { maxTicksLimit: 8, font: { size: 10 } },
+            grid: { display: false },
+          },
+          y: {
+            title: { display: true, text: `Temperature (${tempUnit()})`, font: { size: 10 } },
+            ticks: { font: { size: 9 } },
+            grid: { color: "rgba(0,0,0,0.04)" },
+          },
+          rh: {
+            position: "right",
+            min: 0,
+            max: 100,
+            ticks: { stepSize: 25, font: { size: 9 }, callback: v => `${v}%` },
+            grid: { display: false },
+          },
+        },
+        layout: {
+          padding: { top: 8, right: 4 },
+        },
+      },
+    });
+  }
+
+  // --- Align plot areas so the charts' time axes line up ---
+  // The pressure and humidity charts have right-hand axes, so pad each chart
+  // until all plot areas share the same left and right edges.
+  function alignCharts() {
+    const charts = [chart, gradientChart, humidityChart].filter(Boolean);
+    if (charts.length < 2) return;
+    const left = Math.max(...charts.map(c => c.chartArea.left));
+    const right = Math.min(...charts.map(c => c.chartArea.right));
+    charts.forEach(c => {
+      const dl = left - c.chartArea.left;
+      const dr = c.chartArea.right - right;
+      if (dl === 0 && dr === 0) return;
+      const pad = c.options.layout.padding;
+      c.options.layout.padding = {
+        top: pad.top || 0,
+        bottom: pad.bottom || 0,
+        left: (pad.left || 0) + dl,
+        right: (pad.right || 0) + dr,
+      };
+      c.update();
+    });
+  }
+
+  function renderCharts() {
+    buildChart();
+    buildGradientChart();
+    buildHumidityChart();
+    alignCharts();
+  }
+
   // --- Dynamic chart height based on viewport ---
   function setChartHeight() {
     const container = document.getElementById("chart-container");
     const gradContainer = document.getElementById("gradient-container");
+    const humContainer = document.getElementById("humidity-container");
     const vh = window.innerHeight;
     const isMobile = window.innerWidth <= 600;
     // Pressure chart: ~40% on mobile, ~38% on desktop
     const mainRatio = isMobile ? 0.40 : 0.38;
     // Gradient chart: ~20% on mobile, ~18% on desktop
     const gradRatio = isMobile ? 0.20 : 0.18;
+    // Temperature & humidity chart: ~24% on mobile, ~22% on desktop (has a legend)
+    const humRatio = isMobile ? 0.24 : 0.22;
     container.style.height = Math.max(180, Math.round(vh * mainRatio)) + "px";
     gradContainer.style.height = Math.max(100, Math.round(vh * gradRatio)) + "px";
+    humContainer.style.height = Math.max(140, Math.round(vh * humRatio)) + "px";
     if (chart) chart.resize();
     if (gradientChart) gradientChart.resize();
+    if (humidityChart) humidityChart.resize();
   }
 
   window.addEventListener("resize", setChartHeight);
@@ -798,8 +973,7 @@
     errorEl.style.display = "none";
     try {
       await fetchPressure(lat, lon);
-      buildChart();
-      buildGradientChart();
+      renderCharts();
     } catch (e) {
       showError(e.message);
     }
@@ -940,8 +1114,7 @@
           await dataPromise;
           currentLat = lat;
           currentLon = lon;
-          buildChart();
-          buildGradientChart();
+          renderCharts();
         } catch (e) {
           showError(e.message);
         }
@@ -969,7 +1142,7 @@
 
   unitSelect.addEventListener("change", () => {
     currentUnit = unitSelect.value;
-    if (rawPressures.length) { buildChart(); buildGradientChart(); }
+    if (rawPressures.length) renderCharts();
   });
 
   // --- Auto-load on page open ---
